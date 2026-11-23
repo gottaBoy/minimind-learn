@@ -64,12 +64,22 @@ class MiniMindVLM(MiniMindForCausalLM):
 
     @staticmethod
     def image2tensor(image, processor):
+        if processor is None:
+            raise RuntimeError(
+                "VLM vision encoder is unavailable. Download CLIP to "
+                "model/vision_model/clip-vit-base-patch16 before running VLM training."
+            )
         if image.mode in ['RGBA', 'LA']: image = image.convert('RGB')
         inputs = processor(images=image, return_tensors="pt")['pixel_values']
         return inputs
     
     @staticmethod
     def get_image_embeddings(image_tensors, vision_model):
+        if vision_model is None:
+            raise RuntimeError(
+                "VLM vision encoder is unavailable. Download CLIP to "
+                "model/vision_model/clip-vit-base-patch16 before running VLM training."
+            )
         with torch.no_grad():
             outputs = vision_model.vision_model(pixel_values=image_tensors)
         # outputs 包含 last_hidden_state 和 pooler_output

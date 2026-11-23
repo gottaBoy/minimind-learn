@@ -21,7 +21,10 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from transformers import AutoModel
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from dataset.lm_dataset import RLAIFDataset
-from trainer.train_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model
+from trainer.train_utils import (
+    Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed,
+    SkipBatchSampler, init_model, autocast_context, project_path,
+)
 
 warnings.filterwarnings('ignore')
 
@@ -317,7 +320,7 @@ def ppo_train_epoch(epoch, loader, iters, old_actor_model, ref_model, actor_sche
         loss.backward()
 
         '''Step 6: 梯度更新与旧策略更新'''
-        if (step + 1) % args.accumulation_steps == 0:
+        if step % args.accumulation_steps == 0 or step == iters:
             clip_grad_norm_(actor_model.parameters(), args.grad_clip)
             clip_grad_norm_(critic_model.parameters(), args.grad_clip)
             actor_optimizer.step()
@@ -361,7 +364,7 @@ def ppo_train_epoch(epoch, loader, iters, old_actor_model, ref_model, actor_sche
             old_actor_model.load_state_dict({k: v.detach().cpu() for k, v in state_dict.items()})
             old_actor_model.to(args.device)
 
-        if (step % args.save_interval == 0 or step == iters - 1) and is_main_process():
+        if (step % args.save_interval == 0 or step == iters) and is_main_process():
             actor_model.eval()
             moe_suffix = '_moe' if lm_config.use_moe else ''
             ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
@@ -369,7 +372,7 @@ def ppo_train_epoch(epoch, loader, iters, old_actor_model, ref_model, actor_sche
             torch.save({k: v.half().cpu() for k, v in actor_state.items()}, ckp)
             
             lm_checkpoint(lm_config, weight=args.save_weight, model=actor_model, optimizer=actor_optimizer, 
-                         epoch=epoch, step=step, wandb=wandb, save_dir='../checkpoints',
+                         epoch=epoch, step=step, wandb=wandb, save_dir='checkpoints',
                          scheduler=actor_scheduler, critic_model=critic_model, 
                          critic_optimizer=critic_optimizer, critic_scheduler=critic_scheduler)
             actor_model.train()
@@ -386,14 +389,14 @@ if __name__ == "__main__":
     torch.autograd.set_detect_anomaly(True)
 
     parser = argparse.ArgumentParser(description="MiniMind PPO (Proximal Policy Optimization)")
-    parser.add_argument("--save_dir", type=str, default="../out", help="模型保存目录")
+    parser.add_argument("--save_dir", type=str, default="out", help="模型保存目录")
     parser.add_argument('--save_weight', default='ppo_actor', type=str, help="保存权重的前缀名")
     parser.add_argument("--epochs", type=int, default=1, help="训练轮数")
     parser.add_argument("--batch_size", type=int, default=2, help="batch size")
     parser.add_argument("--learning_rate", type=float, default=8e-8, help="Actor学习率")
     parser.add_argument("--critic_learning_rate", type=float, default=8e-8, help="Critic学习率")
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="训练设备")
-    parser.add_argument("--dtype", type=str, default="bfloat16", help="混合精度类型")
+    parser.add_argument("--dtype", type=str, default="bfloat16", choices=["float32", "float16", "bfloat16"], help="混合精度类型")
     parser.add_argument("--num_workers", type=int, default=1, help="数据加载线程数")
     parser.add_argument("--accumulation_steps", type=int, default=1, help="梯度累积步数")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪阈值")
@@ -404,7 +407,7 @@ if __name__ == "__main__":
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
     parser.add_argument('--max_seq_len', default=66, type=int, help="Prompt最大长度")
     parser.add_argument("--max_gen_len", type=int, default=512, help="生成的最大长度 (减小以节省显存)")
-    parser.add_argument("--data_path", type=str, default="../dataset/rlaif-mini.jsonl", help="RLAIF数据路径")
+    parser.add_argument("--data_path", type=str, default="dataset/rlaif-mini.jsonl", help="RLAIF数据路径")
     parser.add_argument("--clip_epsilon", type=float, default=0.1, help="PPO裁剪参数")
     parser.add_argument("--vf_coef", type=float, default=0.5, help="Value function系数")
     parser.add_argument("--kl_coef", type=float, default=0.02, help="KL散度惩罚系数")
@@ -415,6 +418,9 @@ if __name__ == "__main__":
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="MiniMind-PPO", help="wandb项目名")
     args = parser.parse_args()
+    args.save_dir = project_path(args.save_dir)
+    args.data_path = project_path(args.data_path)
+    args.reward_model_path = project_path(args.reward_model_path)
 
     # ... (后续 main 逻辑保持原样，直接复制你的代码即可)
     # ========== 1. 初始化环境和随机种子 ==========
@@ -425,7 +431,7 @@ if __name__ == "__main__":
     # ========== 2. 配置目录、模型参数、检查ckp ==========
     os.makedirs(args.save_dir, exist_ok=True)
     lm_config = MiniMindConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers, use_moe=bool(args.use_moe))
-    ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='../checkpoints') if args.from_resume==1 else None
+    ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='checkpoints') if args.from_resume==1 else None
     
     # ========== 3. 设置混合精度 ==========
     device_type = "cuda" if "cuda" in args.device else "cpu"
@@ -440,7 +446,7 @@ if __name__ == "__main__":
         autocast_ctx = nullcontext()
         print("DEBUG: Autocast DISABLED for float32 training.")
     else:
-        autocast_ctx = torch.cuda.amp.autocast(dtype=dtype)
+        autocast_ctx = autocast_context(device_type, dtype)
         print(f"DEBUG: Autocast ENABLED with {dtype}.")
     
     
@@ -531,10 +537,10 @@ if __name__ == "__main__":
     for epoch in range(start_epoch, args.epochs):
         train_sampler and train_sampler.set_epoch(epoch)
         if epoch == start_epoch and start_step > 0:  # 第一个epoch且存在检查点
-            batch_sampler = SkipBatchSampler(train_sampler or range(len(train_ds)), args.batch_size, start_step + 1)
+            batch_sampler = SkipBatchSampler(train_sampler or range(len(train_ds)), args.batch_size, start_step)
             loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True)
             Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
-            ppo_train_epoch(epoch, loader, len(loader) + start_step + 1, old_actor_model, ref_model, 
+            ppo_train_epoch(epoch, loader, len(loader) + start_step, old_actor_model, ref_model,
                            actor_scheduler, critic_scheduler, reward_model, reward_tokenizer, start_step, wandb)
         else:  # 默认从头开始
             loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=(train_sampler is None), 

@@ -1,0 +1,10 @@
+# Python 3.12 + Linux aarch64 + NVIDIA CUDA 13.x
+# Verified on this GB10 with torch 2.14.0+cu130.
+# Optional experiment tracking: uv pip install --python .venv/bin/python swanlab==0.6.8
+--index-url https://pypi.org/simple
+torch==2.14.0
+torchvision==0.29.0
+numpy==1.26.4
+pillow==13.0.0
+transformers==4.57.1
+tokenizers==0.22.2

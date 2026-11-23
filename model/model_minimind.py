@@ -39,7 +39,7 @@ class MiniMindConfig(PretrainedConfig):
             inference_rope_scaling: bool = False, # 开关：是否在推理阶段开启 RoPE 缩放 (用于外推长度)
             
             # === 硬件加速 ===
-            flash_attn: bool = True,         # 开关：是否使用 Flash Attention 2 加速计算 (需硬件支持)
+            flash_attn: bool = True,         # 使用 PyTorch SDPA；实际内核由设备、dtype 等条件决定
 
             ####################################################
             # MOE (混合专家模型) 专属配置区域
@@ -112,10 +112,18 @@ import torch
 import torch.nn as nn
 import torch.nn.init as init
 import torch.nn.functional as F
+from dataclasses import dataclass
 from typing import Optional, Tuple, List, Union
 from transformers.activations import ACT2FN
 from transformers import PreTrainedModel, GenerationMixin, PretrainedConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
+
+
+@dataclass
+class MiniMindCausalLMOutput(CausalLMOutputWithPast):
+    last_hidden_state: Optional[torch.Tensor] = None
+    aux_loss: Optional[torch.Tensor] = None
+
 
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-5):
@@ -177,8 +185,6 @@ def precompute_freqs_cis(dim: int, end: int = int(32 * 1024), rope_base: float =
 
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     '''
-        !!!!!!! 此处向量的维度暂不确定，等后续debug时再确认!!!!!!
-
         应用旋转位置编码（RoPE）到查询向量 q 和键向量 k。
         
         参数:
@@ -186,7 +192,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
         - k: 键向量，形状为 [batch_size, seq_len, num_heads, head_dim]
         - cos: 预计算的余弦频率，形状为 [seq_len, head_dim]
         - sin: 预计算的正弦频率，形状为 [seq_len, head_dim]
-        - position_ids: 位置索引，形状为 [batch_size, seq_len]
+        - position_ids: 当前实现未使用；调用方已按起始位置截取 cos/sin
         
         返回:
         - q_embed: 编码后的查询向量
@@ -212,20 +218,20 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
-    重复键值张量的最后一个维度 n_rep 次。
+    沿注意力头维度重复每个 KV 头 n_rep 次，保持单头宽度不变。
 
     参数:
-    - x: 输入张量，形状为 [batch_size, seq_len, num_heads, head_dim]
+    - x: 输入张量，形状为 [batch_size, seq_len, num_kv_heads, head_dim]
     - n_rep: 重复次数
 
     返回:
-    - 重复后的张量，形状为 [batch_size, seq_len, num_heads, head_dim * n_rep]
+    - 重复后的张量，形状为 [batch_size, seq_len, num_kv_heads * n_rep, head_dim]
     """
     batch_size, seq_len, num_k_v_heads, head_dim = x.shape
     if n_rep == 1:
         return x
-    # None：等价于np.newaxis，作用是在指定位置插入一个长度为 1 的新维度（这里插入在第 3 维），下面举例示意维度变化
-    # (2,10,8,64) → (2,10,8,1,64) →                 (2,10,8,2,64)                     → (2,10,8,128)
+    # 插入重复维度，展开后合并到头维度。例如 n_rep=2：
+    # (2,10,8,64) -> (2,10,8,1,64) -> (2,10,8,2,64) -> (2,10,16,64)
     return x[:, :, :, None, :].expand(batch_size, seq_len, num_k_v_heads, n_rep, head_dim).reshape(batch_size, seq_len, num_k_v_heads * n_rep, head_dim)
 
 class Attention(nn.Module):
@@ -276,23 +282,34 @@ class Attention(nn.Module):
             repeat_kv(xv, self.n_rep).transpose(1, 2)
         )
 
-        if self.flash and seq_len > 1 and (attention_mask is None or torch.all(attention_mask == 1)):
-            output = F.scaled_dot_product_attention(xq, xk, xv, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
+        past_len = xk.size(-2) - seq_len
+        attn_mask = None
+        is_causal = past_len == 0 and seq_len > 1
+        # SDPA's implicit causal mask is upper-left aligned. Cached queries
+        # need positions offset by the number of already cached tokens.
+        if attention_mask is not None or (past_len > 0 and seq_len > 1):
+            query_positions = torch.arange(seq_len, device=xq.device) + past_len
+            key_positions = torch.arange(xk.size(-2), device=xq.device)
+            attn_mask = key_positions[None, :] <= query_positions[:, None]
+            attn_mask = attn_mask[None, None, :, :]
+            if attention_mask is not None:
+                attn_mask = attn_mask & attention_mask[:, None, None, :].bool()
+            is_causal = False
+
+        if self.flash:
+            output = F.scaled_dot_product_attention(
+                xq, xk, xv, attn_mask=attn_mask,
+                dropout_p=self.dropout if self.training else 0.0,
+                is_causal=is_causal,
+            )
         else:
             scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
-            # 因果掩码
-            scores = scores + torch.triu(
-                torch.full((seq_len, seq_len), float("-inf"), device=scores.device),
-                diagonal=1
-            ).unsqueeze(0).unsqueeze(0)  # scores+mask
-
-            # 用户指定的屏蔽位置，比如 padding
-            if attention_mask is not None:
-                extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
-                extended_attention_mask = (1.0 - extended_attention_mask) * -1e9
-                scores = scores + extended_attention_mask
-
+            if attn_mask is None and is_causal:
+                attn_mask = torch.ones(seq_len, seq_len, device=xq.device, dtype=torch.bool).tril()
+            if attn_mask is not None:
+                scores = scores.masked_fill(~attn_mask, float("-inf"))
             scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+            scores = torch.nan_to_num(scores)
             scores = self.attn_dropout(scores)
             output = scores @ xv
 
@@ -491,8 +508,6 @@ class MiniMindModel(nn.Module):
                 **kwargs
                 ):
         batch_size, seq_len = input_ids.shape
-        # 先清空一下 past_key_values 防止出错
-        if hasattr(past_key_values, 'layers'): past_key_values = None
         past_key_values = past_key_values or [None] * self.num_hidden_layers
         # past_key_values: List of Tuples, 每个 Tuple 是每一个block层的 (key, value)
         # shape: (batch_size, past_seq_len, num_kv_heads, head_dim)
@@ -548,8 +563,26 @@ class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
         #   lm_head：特征向量 → logits（用共享权重的「列」）；
         #   两者共享权重，保证「嵌入→特征→生成」的语义一致性，同时减少参数量。
         self.model.embed_tokens.weight = self.lm_head.weight
-        # 6. 初始化输出容器（可选：存储模型输出的结构化对象）
-        self.OUT = CausalLMOutputWithPast()
+    @classmethod
+    def _supports_default_dynamic_cache(cls):
+        # This model stores (batch, sequence, heads, dim) tensors in a list.
+        return False
+
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None,
+                                      attention_mask=None, token_type_ids=None, **kwargs):
+        """Keep generation compatible with recent Transformers cache handling."""
+        if past_key_values and past_key_values[0] is not None:
+            input_ids = input_ids[:, -1:]
+        inputs = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "past_key_values": past_key_values,
+            "use_cache": kwargs.get("use_cache", True),
+            "logits_to_keep": 1,
+        }
+        if "pixel_values" in kwargs:
+            inputs["pixel_values"] = kwargs["pixel_values"]
+        return inputs
 
     def forward(self, 
                 input_ids: Optional[torch.Tensor] = None,
@@ -582,8 +615,7 @@ class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
         # 关键优化：只对「需要的 token 特征」做线性映射，避免对整个序列（比如长度 1024）的所有 token 计算 logits，
         # 节省计算资源（尤其是生成时，只需计算最后一个 token 的 logits）。
         logits = self.lm_head(h[:, slice_indices, :])  
-        self.OUT.__setitem__('last_hidden_state', h)
-        self.OUT.__setitem__('logits', logits)
-        self.OUT.__setitem__('aux_loss', aux_loss)
-        self.OUT.__setitem__('past_key_values', past_kvs)
-        return self.OUT
+        return MiniMindCausalLMOutput(
+            last_hidden_state=h, logits=logits, aux_loss=aux_loss,
+            past_key_values=past_kvs if use_cache else None,
+        )

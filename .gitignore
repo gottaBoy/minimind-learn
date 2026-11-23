@@ -1,15 +1,21 @@
 # Ignore Visual Studio Code settings
 .vscode/*
+!.vscode/launch.json
 
 model/vision_model/clip-vit-base-patch16
 
 *.pyc
+.venv/
+.uv-cache/
+.tools/
 # pixi environments
 .pixi/*
 !.pixi/config.toml
 # Ignore dataset files
 dataset/*.json
 dataset/*.jsonl
+!dataset/demo_pretrain.jsonl
+!dataset/demo_sft.jsonl
 dataset/pretrain_images/*
 dataset/sft_images/*
 dataset/eval_images/*

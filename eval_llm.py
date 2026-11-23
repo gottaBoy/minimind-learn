@@ -1,16 +1,18 @@
 import argparse
+import sys
 import warnings
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
-from model.model_lora import *
-from trainer.train_utils import setup_seed
+from model.model_lora import apply_lora, load_lora
+from trainer.train_utils import setup_seed, project_path, torch_load
 warnings.filterwarnings('ignore')
 
 def init_model(args):
     # 如果args.load_from为'model'，会优先去./model路径下查找，加载自定义MiniMind模型，否则加载transformers格式模型
-    tokenizer = AutoTokenizer.from_pretrained(args.load_from)
-    if 'model' in args.load_from:
+    native = args.load_from == "model"
+    tokenizer = AutoTokenizer.from_pretrained(project_path("model") if native else args.load_from)
+    if native:
         model = MiniMindForCausalLM(MiniMindConfig(
             hidden_size=args.hidden_size,
             num_hidden_layers=args.num_hidden_layers,
@@ -18,11 +20,11 @@ def init_model(args):
             inference_rope_scaling=args.inference_rope_scaling
         ))
         moe_suffix = '_moe' if args.use_moe else ''
-        ckp = f'./{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
-        model.load_state_dict(torch.load(ckp, map_location=args.device), strict=True)
+        ckp = f'{project_path(args.save_dir)}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
+        model.load_state_dict(torch_load(ckp, map_location=args.device), strict=True)
         if args.lora_weight != 'None':
             apply_lora(model)
-            load_lora(model, f'./{args.save_dir}/lora/{args.lora_weight}_{args.hidden_size}.pth')
+            load_lora(model, f'{args.save_dir}/lora/{args.lora_weight}_{args.hidden_size}.pth')
     else:
         model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
     print(f'MiniMind模型参数: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M(illion)')
@@ -39,12 +41,16 @@ def main():
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量（Small/MoE=8, Base=16）")
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
     parser.add_argument('--inference_rope_scaling', default=False, action='store_true', help="启用RoPE位置编码外推（4倍，仅解决位置编码问题）")
-    parser.add_argument('--max_new_tokens', default=8192, type=int, help="最大生成长度（注意：并非模型实际长文本能力）")
+    parser.add_argument('--max_new_tokens', default=256, type=int, help="最大生成长度（注意：并非模型实际长文本能力）")
     parser.add_argument('--temperature', default=0.85, type=float, help="生成温度，控制随机性（0-1，越大越随机）")
     parser.add_argument('--top_p', default=0.85, type=float, help="nucleus采样阈值（0-1）")
     parser.add_argument('--historys', default=0, type=int, help="携带历史对话轮数（需为偶数，0表示不携带历史）")
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
+    parser.add_argument('--input_mode', type=int, choices=[0, 1], default=None,
+                        help="0=自动测试，1=交互输入；未指定时按是否有终端自动选择")
+    parser.add_argument('--prompt', type=str, help="直接运行单条输入，不进入交互模式")
     args = parser.parse_args()
+    args.save_dir = project_path(args.save_dir)
     
     prompts = [
         '你有什么特长？',
@@ -59,7 +65,13 @@ def main():
     
     conversation = []
     model, tokenizer = init_model(args)
-    input_mode = int(input('[0] 自动测试\n[1] 手动输入\n'))
+    if args.prompt is not None:
+        prompts = [args.prompt]
+        input_mode = 0
+    elif args.input_mode is None:
+        input_mode = int(input('[0] 自动测试\n[1] 手动输入\n')) if sys.stdin.isatty() else 0
+    else:
+        input_mode = args.input_mode
     streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
     
     prompt_iter = prompts if input_mode == 0 else iter(lambda: input('👶: '), '')

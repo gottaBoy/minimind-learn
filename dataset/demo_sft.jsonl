@@ -1,0 +1,3 @@
+{"conversations":[{"role":"user","content":"What is MiniMind?"},{"role":"assistant","content":"MiniMind is a small language model project designed for learning and experiments."}]}
+{"conversations":[{"role":"user","content":"What does a transformer predict?"},{"role":"assistant","content":"A transformer predicts the next token from the preceding context."}]}
+{"conversations":[{"role":"user","content":"Why start with a tiny dataset?"},{"role":"assistant","content":"A tiny dataset makes it possible to verify the complete training pipeline quickly."}]}

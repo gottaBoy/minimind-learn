@@ -1,15 +1,12 @@
-# sft
-# python eval_llm.py \
-#     --use_moe 0 \
-#     --weight full_sft
+#!/usr/bin/env bash
+set -euo pipefail
 
-# lora
-# python eval_llm.py \
-#     --use_moe 0 \
-#     --weight full_sft \
-#     --lora_weight lora_identity
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+PYTHON="${PYTHON:-$ROOT/.venv/bin/python}"
+DEVICE="${DEVICE:-cuda}"
 
-# reasoning
-python eval_llm.py \
-    --use_moe 0 \
-    --weight reason
+"$PYTHON" eval_llm.py \
+  --device "$DEVICE" \
+  --weight "${WEIGHT:-pretrain}" \
+  --save_dir out

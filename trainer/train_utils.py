@@ -1,9 +1,8 @@
-"""
-训练工具函数集合
-"""
-from logging import Logger
+"""训练工具函数集合。"""
+from contextlib import nullcontext
 import os
 import math
+from pathlib import Path
 import random
 import numpy as np
 import torch
@@ -12,6 +11,47 @@ from torch.utils.data import Sampler
 from transformers import AutoTokenizer
 from model.model_minimind import MiniMindForCausalLM
 from model.model_vlm import MiniMindVLM
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def project_path(path):
+    """Resolve relative paths from the repository root."""
+    if path is None:
+        return None
+    path = Path(path).expanduser()
+    if path.is_absolute():
+        return str(path)
+    return str(PROJECT_ROOT / path)
+
+
+def torch_load(path, map_location="cpu"):
+    """Load tensor weights and optimizer metadata with the restricted loader."""
+    return torch.load(path, map_location=map_location, weights_only=True)
+
+
+def autocast_context(device_type, dtype):
+    if device_type == "cpu" or dtype == torch.float32:
+        return nullcontext()
+    return torch.amp.autocast(device_type=device_type, dtype=dtype)
+
+
+def grad_scaler(device_type, dtype):
+    enabled = device_type == "cuda" and dtype == torch.float16
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        try:
+            return torch.amp.GradScaler(device_type, enabled=enabled)
+        except TypeError:
+            return torch.amp.GradScaler(enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
+def accumulation_divisor(step, total_steps, accumulation_steps):
+    """Scale the final partial accumulation group by its actual batch count."""
+    group_start = ((step - 1) // accumulation_steps) * accumulation_steps
+    return min(accumulation_steps, total_steps - group_start)
+
 
 def is_main_process():
     return not dist.is_initialized() or dist.get_rank() == 0
@@ -52,24 +92,29 @@ def setup_seed(seed: int):
     random.seed(seed)
     # 设置 NumPy 随机数生成器的种子
     np.random.seed(seed)
+    torch.manual_seed(seed)
     # 固定当前 GPU 的随机种子
     # PyTorch 中 当前使用的单块 GPU 的随机操作（比如 GPU 上的张量随机初始化、GPU 上的 Dropout 等）会使用这个种子；
-    torch.cuda.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
     # 固定所有 GPU 的随机种子
     # 分布式训练（比如 DDP 模式）中，多块 GPU 同时工作，需要固定所有 GPU 的种子，避免不同 GPU 上的随机操作不一致。
-    torch.cuda.manual_seed_all(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     # 强制 cuDNN 使用确定性算法
     # 背景：cuDNN 是 NVIDIA 提供的 GPU 加速库，PyTorch 的卷积、池化等操作会依赖它；
     # 作用：默认情况下，cuDNN 为了追求速度，可能会选择非确定性算法（同一输入可能得到不同输出）；设置为 True 后，cuDNN 会强制使用 确定性算法（同一输入一定得到相同输出）；
-    torch.backends.cudnn.deterministic = True
+    if torch.cuda.is_available():
+        torch.backends.cudnn.deterministic = True
     # 关闭 cuDNN 的自动优化（benchmark）
     # benchmark=True 时，cuDNN 会在训练开始前，对当前任务的卷积操作进行 “测速”，选择最快的卷积算法（不同次运行可能选不同算法）；
     # 作用：设置为 False 后，cuDNN 会禁用这种自动选择，每次都使用固定的算法（配合 deterministic=True 进一步保证结果一致）；
     # 补充：如果你的输入数据的形状（比如图片尺寸、batch size）是固定的，benchmark=True 能加速训练，但会牺牲可复现性；实验阶段建议关闭，正式训练时可根据需求开启。
-    torch.backends.cudnn.benchmark = False
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = False
 
-def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoch=0, step=0, wandb=None, save_dir='../checkpoints', **kwargs):
+def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoch=0, step=0, wandb=None, save_dir='checkpoints', **kwargs):
+    save_dir = project_path(save_dir)
     os.makedirs(save_dir, exist_ok=True)
     moe_path = '_moe' if lm_config.use_moe else ''
     ckp_path = f'{save_dir}/{weight}_{lm_config.hidden_size}{moe_path}.pth'
@@ -127,7 +172,7 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
         if os.path.exists(resume_path):
             # 不管保存时 tensor 在哪个设备（GPU 0、GPU 1、多卡分布式），加载后所有 tensor 都放到 CPU 上；
             # 先加载到 CPU，后续可按需将 tensor 移到 GPU（或分批次移动），避免显存峰值过高。
-            ckp_data = torch.load(resume_path, map_location='cpu')
+            ckp_data = torch_load(resume_path, map_location='cpu')
             saved_ws = ckp_data.get('world_size', 1)
             current_ws = dist.get_world_size() if dist.is_initialized() else 1
             if saved_ws != current_ws:
@@ -145,30 +190,29 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
             return ckp_data
         return None
 
-def init_model(lm_config, from_weight='none', tokenizer_path='../model', save_dir='../out', device='cuda'):
-    tokenizer_path = os.path.join(os.path.dirname(__file__), "..", "model") # 避免 debug 时搞错根目录，找不到tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+def init_model(lm_config, from_weight='none', tokenizer_path='model', save_dir='out', device='cuda'):
+    tokenizer = AutoTokenizer.from_pretrained(project_path(tokenizer_path))
     model = MiniMindForCausalLM(lm_config)
 
     if from_weight != 'none':
         moe_suffix = '_moe' if lm_config.use_moe else ''
-        weight_path = f'{save_dir}/{from_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
-        weights = torch.load(weight_path, map_location=device)
+        weight_path = Path(project_path(save_dir)) / f'{from_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
+        weights = torch_load(weight_path, map_location=device)
         model.load_state_dict(weights, strict=False)
 
     Logger(f'所加载Model可训练参数：{sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f} 百万')
     return model.to(device), tokenizer
 
-def init_vlm_model(vlm_config, from_weight='pretrain_vlm', tokenizer_path='../model', 
-                   vision_model_path='../model/vision_model/clip-vit-base-patch16', 
-                   save_dir='../out', device='cuda', freeze_llm=False):
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-    model = MiniMindVLM(vlm_config, vision_encoder_path=vision_model_path)
+def init_vlm_model(vlm_config, from_weight='pretrain_vlm', tokenizer_path='model',
+                   vision_model_path='model/vision_model/clip-vit-base-patch16',
+                   save_dir='out', device='cuda', freeze_llm=False):
+    tokenizer = AutoTokenizer.from_pretrained(project_path(tokenizer_path))
+    model = MiniMindVLM(vlm_config, vision_encoder_path=project_path(vision_model_path))
     
     if from_weight != 'none':
         moe_suffix = '_moe' if vlm_config.use_moe else ''
-        weight_path = f'{save_dir}/{from_weight}_{vlm_config.hidden_size}{moe_suffix}.pth'
-        weights = torch.load(weight_path, map_location=device)
+        weight_path = Path(project_path(save_dir)) / f'{from_weight}_{vlm_config.hidden_size}{moe_suffix}.pth'
+        weights = torch_load(weight_path, map_location=device)
         model.load_state_dict(weights, strict=False)
     
     # Pretrain阶段：冻结除 vision_proj 外的所有参数
@@ -188,7 +232,8 @@ def init_vlm_model(vlm_config, from_weight='pretrain_vlm', tokenizer_path='../mo
     return model.to(device), tokenizer, preprocess
 
 
-def vlm_checkpoint(vlm_config, weight='pretrain_vlm', model=None, optimizer=None, epoch=0, step=0, wandb=None, save_dir='../checkpoints', **kwargs):
+def vlm_checkpoint(vlm_config, weight='pretrain_vlm', model=None, optimizer=None, epoch=0, step=0, wandb=None, save_dir='checkpoints', **kwargs):
+    save_dir = project_path(save_dir)
     os.makedirs(save_dir, exist_ok=True)
     moe_path = '_moe' if vlm_config.use_moe else ''
     ckp_path = f'{save_dir}/{weight}_{vlm_config.hidden_size}{moe_path}.pth'
@@ -238,7 +283,7 @@ def vlm_checkpoint(vlm_config, weight='pretrain_vlm', model=None, optimizer=None
         torch.cuda.empty_cache()
     else:  # 加载模式
         if os.path.exists(resume_path):
-            ckp_data = torch.load(resume_path, map_location='cpu')
+            ckp_data = torch_load(resume_path, map_location='cpu')
             saved_ws = ckp_data.get('world_size', 1)
             current_ws = dist.get_world_size() if dist.is_initialized() else 1
             if saved_ws != current_ws:

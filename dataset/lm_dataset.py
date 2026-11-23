@@ -42,11 +42,14 @@ class PretrainDataset(Dataset):
             return_tensors='pt'
         )
         input_ids = encoding.input_ids.squeeze()  # 去掉批次维度
-        loss_mask = (input_ids != self.tokenizer.pad_token_id)  # 创建损失掩码，非填充部分为1，填充部分为0
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+        loss_mask = (input_ids != pad_token_id)  # 创建损失掩码，非填充部分为1，填充部分为0
 
-        X = torch.tensor(input_ids[:-1], dtype=torch.long)  # 输入序列，去掉最后一个token
-        Y = torch.tensor(input_ids[1:], dtype=torch.long)   # 目标序列，去掉第一个token
-        loss_mask = torch.tensor(loss_mask[1:], dtype=torch.long)  # 损失掩码，去掉第一个token对应的掩码
+        X = input_ids[:-1].clone().long()  # 输入序列，去掉最后一个token
+        Y = input_ids[1:].clone().long()   # 目标序列，去掉第一个token
+        loss_mask = loss_mask[1:].long()  # 损失掩码，去掉第一个token对应的掩码
         return X, Y, loss_mask
     
 
@@ -117,7 +120,10 @@ class SFTDataset(Dataset):
         # 构建对话提示
         prompt = self._create_chat_prompt(sample['conversations'])
         input_ids = self.tokenizer(prompt).input_ids[:self.max_length]
-        input_ids += [self.tokenizer.pad_token_id] * (self.max_length - len(input_ids))
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+        input_ids += [pad_token_id] * (self.max_length - len(input_ids))
 
         # 生成动态损失掩码
         loss_mask = self._generate_loss_mask(input_ids)
@@ -317,7 +323,10 @@ class VLMDataset(Dataset):
         image_paths = sample['image']
         prompt = self._create_chat_prompt(sample['conversations'])
         input_ids = self.tokenizer(prompt).input_ids[:self.max_length]
-        input_ids += [self.tokenizer.pad_token_id] * (self.max_length - len(input_ids))
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+        input_ids += [pad_token_id] * (self.max_length - len(input_ids))
         loss_mask = self._generate_loss_mask(input_ids)
 
         X = torch.tensor(input_ids[:-1], dtype=torch.long)

@@ -10,13 +10,16 @@ import warnings
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
-from contextlib import nullcontext
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from model.model_minimind import MiniMindConfig
 from dataset.lm_dataset import DPODataset
-from trainer.train_utils import get_lr, Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, init_model, SkipBatchSampler
+from trainer.train_utils import (
+    get_lr, Logger, is_main_process, lm_checkpoint, init_distributed_mode,
+    setup_seed, init_model, SkipBatchSampler, autocast_context, grad_scaler,
+    project_path,
+)
 
 warnings.filterwarnings('ignore')
 
@@ -81,7 +84,7 @@ def train_epoch(epoch, loader, iters, ref_model, lm_config, start_step=0, wandb=
 
         scaler.scale(loss).backward()
 
-        if (step + 1) % args.accumulation_steps == 0:
+        if step % args.accumulation_steps == 0 or step == iters:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             scaler.step(optimizer)
@@ -89,7 +92,7 @@ def train_epoch(epoch, loader, iters, ref_model, lm_config, start_step=0, wandb=
             optimizer.zero_grad(set_to_none=True)
             torch.cuda.empty_cache()
 
-        if step % args.log_interval == 0 or step == iters - 1:
+        if step % args.log_interval == 0 or step == iters:
             spend_time = time.time() - start_time
             current_loss = loss.item() * args.accumulation_steps
             current_lr = optimizer.param_groups[-1]['lr']
@@ -99,7 +102,7 @@ def train_epoch(epoch, loader, iters, ref_model, lm_config, start_step=0, wandb=
             
             if wandb: wandb.log({"loss": current_loss, "lr": current_lr, "epoch_Time": eta_min})
 
-        if (step % args.save_interval == 0 or step == iters - 1) and is_main_process():
+        if (step % args.save_interval == 0 or step == iters) and is_main_process():
             model.eval()
             moe_suffix = '_moe' if lm_config.use_moe else ''
             ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
@@ -109,7 +112,7 @@ def train_epoch(epoch, loader, iters, ref_model, lm_config, start_step=0, wandb=
                 state_dict = model.state_dict()
             state_dict = {k: v.half().cpu() for k, v in state_dict.items()}
             torch.save(state_dict, ckp)
-            lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, save_dir='../checkpoints')
+            lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, save_dir='checkpoints')
             model.train()
             del state_dict
 
@@ -119,13 +122,13 @@ def train_epoch(epoch, loader, iters, ref_model, lm_config, start_step=0, wandb=
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MiniMind DPO (Direct Preference Optimization)")
-    parser.add_argument("--save_dir", type=str, default="../out", help="模型保存目录")
+    parser.add_argument("--save_dir", type=str, default="out", help="模型保存目录")
     parser.add_argument('--save_weight', default='dpo', type=str, help="保存权重的前缀名")
     parser.add_argument("--epochs", type=int, default=1, help="训练轮数")
     parser.add_argument("--batch_size", type=int, default=4, help="batch size")
     parser.add_argument("--learning_rate", type=float, default=4e-8, help="初始学习率（建议<=5e-8避免遗忘）")
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="训练设备")
-    parser.add_argument("--dtype", type=str, default="bfloat16", help="混合精度类型")
+    parser.add_argument("--dtype", type=str, default="bfloat16", choices=["float32", "float16", "bfloat16"], help="混合精度类型")
     parser.add_argument("--num_workers", type=int, default=1, help="数据加载线程数")
     parser.add_argument("--accumulation_steps", type=int, default=1, help="梯度累积步数")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪阈值")
@@ -135,13 +138,15 @@ if __name__ == "__main__":
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
     parser.add_argument('--max_seq_len', default=1024, type=int, help="训练的最大截断长度")
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
-    parser.add_argument("--data_path", type=str, default="../dataset/dpo.jsonl", help="DPO训练数据路径")
+    parser.add_argument("--data_path", type=str, default="dataset/dpo.jsonl", help="DPO训练数据路径")
     parser.add_argument('--from_weight', default='full_sft', type=str, help="基于哪个权重训练")
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
     parser.add_argument('--beta', default=0.1, type=float, help="DPO中的beta参数")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="MiniMind-DPO", help="wandb项目名")
     args = parser.parse_args()
+    args.save_dir = project_path(args.save_dir)
+    args.data_path = project_path(args.data_path)
 
     # ========== 1. 初始化环境和随机种子 ==========
     local_rank = init_distributed_mode()
@@ -151,12 +156,12 @@ if __name__ == "__main__":
     # ========== 2. 配置目录、模型参数、检查ckp ==========
     os.makedirs(args.save_dir, exist_ok=True)
     lm_config = MiniMindConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers, use_moe=bool(args.use_moe))
-    ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='../checkpoints') if args.from_resume==1 else None
+    ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='checkpoints') if args.from_resume==1 else None
     
     # ========== 3. 设置混合精度 ==========
     device_type = "cuda" if "cuda" in args.device else "cpu"
-    dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
-    autocast_ctx = nullcontext() if device_type == "cpu" else torch.cuda.amp.autocast(dtype=dtype)
+    dtype = getattr(torch, args.dtype)
+    autocast_ctx = autocast_context(device_type, dtype)
     
     # ========== 4. 配wandb ==========
     wandb = None
@@ -178,7 +183,7 @@ if __name__ == "__main__":
     
     train_ds = DPODataset(args.data_path, tokenizer, max_length=args.max_seq_len)
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
-    scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == 'float16'))
+    scaler = grad_scaler(device_type, dtype)
     optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
     
     # ========== 6. 从ckp恢复状态 ==========
@@ -199,10 +204,10 @@ if __name__ == "__main__":
     for epoch in range(start_epoch, args.epochs):
         train_sampler and train_sampler.set_epoch(epoch)
         if epoch == start_epoch and start_step > 0: # 第一个epoch且存在检查点
-            batch_sampler = SkipBatchSampler(train_sampler or range(len(train_ds)), args.batch_size, start_step + 1)
+            batch_sampler = SkipBatchSampler(train_sampler or range(len(train_ds)), args.batch_size, start_step)
             loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True)
             Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
-            train_epoch(epoch, loader, len(loader) + start_step + 1, ref_model, lm_config, start_step, wandb, args.beta)
+            train_epoch(epoch, loader, len(loader) + start_step, ref_model, lm_config, start_step, wandb, args.beta)
         else: # 默认从头开始
             loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=(train_sampler is None), sampler=train_sampler, num_workers=args.num_workers, pin_memory=True)
             train_epoch(epoch, loader, len(loader), ref_model, lm_config, 0, wandb, args.beta)

@@ -1,0 +1,6 @@
+{"text":"MiniMind is a small language model project for learning how pretraining works."}
+{"text":"A transformer predicts the next token from the tokens that came before it."}
+{"text":"Clean experiments start with a small dataset and a short smoke test."}
+{"text":"The model can later be trained with instruction and preference data."}
+{"text":"Readable code makes it easier to understand attention, caching, and generation."}
+{"text":"This demo dataset is intentionally tiny so the complete pipeline can run in minutes."}

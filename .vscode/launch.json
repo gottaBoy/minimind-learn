@@ -1,0 +1,66 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "01 - Inspect pretrain data (CPU)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${workspaceFolder}/scripts/debug_train_step.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": ["--stop_after", "data", "--breakpoints"]
+    },
+    {
+      "name": "02 - Follow one training update (CPU)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${workspaceFolder}/scripts/debug_train_step.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": ["--breakpoints"]
+    },
+    {
+      "name": "03 - Inspect SFT loss mask (CPU)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${workspaceFolder}/scripts/debug_train_step.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": ["--task", "sft", "--max_seq_len", "128", "--token_rows", "128", "--stop_after", "data", "--breakpoints"]
+    },
+    {
+      "name": "04 - Debug original pretrain loop (CPU)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "module": "trainer.train_pretrain",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "stopOnEntry": true,
+      "args": [
+        "--device", "cpu",
+        "--dtype", "float32",
+        "--hidden_size", "128",
+        "--num_hidden_layers", "2",
+        "--max_seq_len", "64",
+        "--batch_size", "1",
+        "--num_workers", "0",
+        "--accumulation_steps", "1",
+        "--max_steps", "1",
+        "--epochs", "1",
+        "--from_weight", "none",
+        "--from_resume", "0",
+        "--data_path", "dataset/demo_pretrain.jsonl",
+        "--save_dir", "out/debug",
+        "--checkpoint_dir", "checkpoints/debug"
+      ]
+    }
+  ]
+}

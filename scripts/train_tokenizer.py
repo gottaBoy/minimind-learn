@@ -1,14 +1,17 @@
+import argparse
 import random
 import json
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
 import os
+from pathlib import Path
 
 from transformers import AutoTokenizer
 
 random.seed(42)
+ROOT = Path(__file__).resolve().parents[1]
 
 
-def train_tokenizer():
+def train_tokenizer(data_path, tokenizer_dir, vocab_size=6400):
     '''从 JSONL 数据集训练 BPE 分词器，定义特殊 Token，保存为标准格式。'''
     # 步骤 1：读取 JSONL 数据集
     def read_texts_from_jsonl(file_path):
@@ -17,8 +20,6 @@ def train_tokenizer():
                 data = json.loads(line)
                 yield data['text']
     
-    data_path = './dataset/pretrain_hq.jsonl'
-
     # 步骤 2：初始化 BPE 分词器
     # BPE（Byte Pair Encoding）：核心思想是「从单字节开始，迭代合并最频繁的字符对」，能平衡词汇量大小和编码效率（既不冗余也不丢失信息）。
     # ByteLevel 预处理：先将文本按 UTF-8 字节拆分（例如 "你好" 拆分为字节 e4 bd a0 e5 a5 bd），再进行 BPE 合并，避免 OOV（未登录词）问题。
@@ -31,7 +32,7 @@ def train_tokenizer():
 
     # 步骤 4：配置 BPE 训练器
     trainer = trainers.BpeTrainer(
-        vocab_size=6400, # 训练后词汇表总大小为 6400（含 3 个特殊 Token，实际 BPE 词表为 6397）。
+        vocab_size=vocab_size, # 包含特殊 Token。
         show_progress=True,
         special_tokens=special_tokens,
         initial_alphabet=pre_tokenizers.ByteLevel.alphabet() # 确保所有单字节都被包含在初始词汇表中，避免字节级 OOV。
@@ -42,7 +43,7 @@ def train_tokenizer():
     tokenizer.train_from_iterator(tests, trainer=trainer)
 
     # 步骤 6：设置解码器并验证特殊 Token
-    tokenizer.decoder = decoders.ByteLevel # 解码器：与预处理对应，将 BPE token 解码回原始文本
+    tokenizer.decoder = decoders.ByteLevel() # 解码器：与预处理对应，将 BPE token 解码回原始文本
 
     # 强制验证特殊 Token 的 ID（确保顺序正确，后续聊天模板依赖此 ID）
     assert tokenizer.token_to_id("<|endoftext|>") == 0
@@ -57,10 +58,9 @@ def train_tokenizer():
     #       - model_max_length=32768：模型支持的最大序列长度（可根据实际模型调整）。
     #       - tokenizer_class="PreTrainedTokenizerFast"：指定 transformers 加载时使用的分词器类（确保兼容性）。
     #   - vocab.json + merges.txt：BPE 词汇表和合并规则（由 tokenizer.model.save() 生成）。
-    tokenizer_dir = './model/'
     os.makedirs(tokenizer_dir, exist_ok=True)
     tokenizer.save(os.path.join(tokenizer_dir, "tokenizer.json"))
-    tokenizer.model.save("./model/")
+    tokenizer.model.save(str(tokenizer_dir))
 
     # 手动创建配置文件 tokenizer_config.json
     config = {
@@ -113,11 +113,11 @@ def train_tokenizer():
 
     print("Tokenizer training completed and saved.")
 
-def eval_tokenizer():
+def eval_tokenizer(tokenizer_dir=ROOT / "model"):
     """训练完成后，用 transformers 加载并验证 3 个核心功能："""
     # 步骤 1：加载分词器
     from transformers import PreTrainedTokenizerFast
-    tokenizer = AutoTokenizer.from_pretrained("./model/")
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir)
 
     # 步骤 2：验证聊天模板
     messages = [
@@ -143,8 +143,17 @@ def eval_tokenizer():
     print('decoder和原始文本是否一致：', response == new_prompt)
 
 def main():
-    # train_tokenizer()
-    eval_tokenizer()
+    parser = argparse.ArgumentParser(description="Train or inspect the MiniMind tokenizer")
+    parser.add_argument("--train", action="store_true")
+    parser.add_argument("--data_path", type=Path, default=ROOT / "dataset/pretrain_hq.jsonl")
+    parser.add_argument("--output_dir", type=Path, default=ROOT / "out/tokenizer")
+    parser.add_argument("--vocab_size", type=int, default=6400)
+    args = parser.parse_args()
+    data_path = args.data_path if args.data_path.is_absolute() else ROOT / args.data_path
+    output_dir = args.output_dir if args.output_dir.is_absolute() else ROOT / args.output_dir
+    if args.train:
+        train_tokenizer(data_path, output_dir, args.vocab_size)
+    eval_tokenizer(output_dir if args.train else ROOT / "model")
 
 if __name__ == "__main__":
     main()
