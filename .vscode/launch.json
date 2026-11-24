@@ -95,6 +95,41 @@
         "--save_dir", "out/debug_accum",
         "--checkpoint_dir", "checkpoints/debug_accum"
       ]
+    },
+    {
+      "name": "06 - Follow SFT update (CPU)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${workspaceFolder}/scripts/debug_train_step.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": ["--task", "sft", "--max_seq_len", "128", "--breakpoints"]
+    },
+    {
+      "name": "07 - Run chapter exercise (CPU)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${workspaceFolder}/scripts/lesson_lab.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "stopOnEntry": true,
+      "args": ["--lesson", "${input:lessonName}"]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "lessonName",
+      "type": "pickString",
+      "description": "选择要运行的章节实验",
+      "default": "sft",
+      "options": [
+        "tokenizer", "data", "model", "pretrain", "sft", "lora",
+        "dpo", "distill", "moe", "ppo", "grpo", "vlm"
+      ]
     }
   ]
 }
