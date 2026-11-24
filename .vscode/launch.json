@@ -61,6 +61,40 @@
         "--save_dir", "out/debug",
         "--checkpoint_dir", "checkpoints/debug"
       ]
+    },
+    {
+      "name": "05 - Inspect gradient accumulation (CPU)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "module": "trainer.train_pretrain",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "stopOnEntry": true,
+      "env": {
+        "OMP_NUM_THREADS": "2",
+        "MKL_NUM_THREADS": "2"
+      },
+      "args": [
+        "--device", "cpu",
+        "--dtype", "float32",
+        "--hidden_size", "128",
+        "--num_hidden_layers", "2",
+        "--max_seq_len", "64",
+        "--batch_size", "1",
+        "--num_workers", "0",
+        "--accumulation_steps", "2",
+        "--max_steps", "3",
+        "--epochs", "1",
+        "--from_weight", "none",
+        "--from_resume", "0",
+        "--log_interval", "1",
+        "--save_interval", "2",
+        "--data_path", "dataset/demo_pretrain.jsonl",
+        "--save_dir", "out/debug_accum",
+        "--checkpoint_dir", "checkpoints/debug_accum"
+      ]
     }
   ]
 }
