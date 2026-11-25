@@ -12,6 +12,7 @@ debug-step = "python scripts/debug_train_step.py"
 demo = "env PYTHON=python bash trainer/run.sh"
 test = "python -m unittest discover -s tests -v"
 lesson = "python scripts/lesson_lab.py"
+check-course = "python scripts/check_course.py"
 
 [system-requirements]
 cuda = "13.0"

@@ -127,7 +127,7 @@
       "description": "选择要运行的章节实验",
       "default": "sft",
       "options": [
-        "tokenizer", "data", "model", "pretrain", "sft", "lora",
+        "tokenizer", "data", "model", "pretrain", "resume", "sft", "lora",
         "dpo", "distill", "moe", "ppo", "grpo", "vlm"
       ]
     }

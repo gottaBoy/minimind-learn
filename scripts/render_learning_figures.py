@@ -5,11 +5,10 @@ import sys
 
 from transformers import AutoTokenizer
 
-from render_pretrain_figures import BLUE, GOLD, GREEN, INK, MUTED, RED, box, canvas, label, lines
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from scripts.render_pretrain_figures import BLUE, GOLD, GREEN, INK, MUTED, RED, box, canvas, label, lines
 from dataset.lm_dataset import SFTDataset
 
 

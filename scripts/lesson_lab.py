@@ -25,6 +25,7 @@ from model.model_vlm import VisionProj, VLMConfig
 from trainer.train_dpo import dpo_loss
 from trainer.train_distillation import distillation_loss
 from trainer.train_ppo import GAE
+from trainer import train_utils
 from trainer.train_utils import setup_seed, torch_load
 
 
@@ -77,27 +78,73 @@ def lesson_model():
     assert activated[0] < 0 and activated[2] > 1
 
 
+def run_pretrain(directory, resume=False):
+    """Run the same three-batch experiment with optional checkpoint loading."""
+    arguments = [
+        "trainer.train_pretrain", "--device", "cpu", "--dtype", "float32",
+        "--hidden_size", "128", "--num_hidden_layers", "2",
+        "--max_seq_len", "64", "--batch_size", "1", "--num_workers", "0",
+        "--epochs", "1", "--max_steps", "3", "--accumulation_steps", "2",
+        "--from_weight", "none", "--from_resume", str(int(resume)),
+        "--log_interval", "1", "--save_interval", "2",
+        "--data_path", str(ROOT / "dataset/demo_pretrain.jsonl"),
+        "--save_dir", str(Path(directory) / "out"),
+        "--checkpoint_dir", str(Path(directory) / "checkpoints"),
+    ]
+    with patch.object(sys, "argv", arguments):
+        runpy.run_module("trainer.train_pretrain", run_name="__main__")
+    return torch_load(Path(directory) / "checkpoints/pretrain_128_resume.pth")
+
+
 def lesson_pretrain():
     # Exercise the real entry point; temporary weights do not overwrite out/.
     with tempfile.TemporaryDirectory(prefix="minimind_lesson_") as directory:
-        arguments = [
-            "trainer.train_pretrain", "--device", "cpu", "--dtype", "float32",
-            "--hidden_size", "128", "--num_hidden_layers", "2",
-            "--max_seq_len", "64", "--batch_size", "1", "--num_workers", "0",
-            "--epochs", "1", "--max_steps", "3", "--accumulation_steps", "2",
-            "--from_weight", "none", "--from_resume", "0",
-            "--log_interval", "1", "--save_interval", "2",
-            "--data_path", str(ROOT / "dataset/demo_pretrain.jsonl"),
-            "--save_dir", str(Path(directory) / "out"),
-            "--checkpoint_dir", str(Path(directory) / "checkpoints"),
-        ]
-        with patch.object(sys, "argv", arguments):
-            runpy.run_module("trainer.train_pretrain", run_name="__main__")
-        checkpoint = torch_load(Path(directory) / "checkpoints/pretrain_128_resume.pth")
+        checkpoint = run_pretrain(directory)
         counts = {int(state["step"].item())
                   for state in checkpoint["optimizer"]["state"].values()}
         assert checkpoint["step"] == 3 and counts == {2}
         print("真实入口验收：处理 3 批，AdamW 更新 2 次；临时权重随后自动清理。")
+
+
+def lesson_resume():
+    class CheckpointPause(Exception):
+        """Stop only after the complete checkpoint has been written."""
+
+    save_checkpoint = train_utils.lm_checkpoint
+
+    def save_then_pause(*args, **kwargs):
+        result = save_checkpoint(*args, **kwargs)
+        if kwargs.get("model") is not None and kwargs["step"] == 2:
+            raise CheckpointPause
+        return result
+
+    with tempfile.TemporaryDirectory(prefix="minimind_resume_lesson_") as directory:
+        reference = run_pretrain(Path(directory) / "continuous")
+        resumed_dir = Path(directory) / "interrupted"
+        try:
+            # Model, optimizer and sampler still come from the real entry point.
+            # The exception simulates stopping after batch 2, without changing
+            # max_steps or the learning-rate schedule between the two runs.
+            with patch.object(train_utils, "lm_checkpoint", save_then_pause):
+                run_pretrain(resumed_dir)
+        except CheckpointPause:
+            print("已在 batch 2 完整保存后暂停：1 次更新，下一批应为 batch 3。")
+        else:
+            raise AssertionError("The checkpoint pause was not reached")
+        paused = torch_load(resumed_dir / "checkpoints/pretrain_128_resume.pth")
+        assert paused["step"] == 2
+        assert {int(state["step"].item())
+                for state in paused["optimizer"]["state"].values()} == {1}
+        restored = run_pretrain(resumed_dir, resume=True)
+        assert restored["step"] == reference["step"] == 3
+        torch.testing.assert_close(restored["model"], reference["model"], rtol=0, atol=0)
+        torch.testing.assert_close(
+            restored["optimizer"]["state"], reference["optimizer"]["state"],
+            rtol=0, atol=0,
+        )
+        assert restored["optimizer"]["param_groups"] == reference["optimizer"]["param_groups"]
+        print("恢复后：只处理 batch 3，总计 2 次更新；模型及 AdamW 状态与连续运行完全一致。")
+        print("验证范围：CPU、float32、固定数据与采样顺序、无 dropout、同一累积边界。")
 
 
 def lesson_sft():
@@ -253,6 +300,7 @@ LESSONS = {
     "data": ("一条样本如何组批", lesson_data),
     "model": ("前向形状与数值", lesson_model),
     "pretrain": ("真实入口：三批、两次更新", lesson_pretrain),
+    "resume": ("保存后暂停，恢复结果与连续训练对照", lesson_resume),
     "sft": ("题干可读，回答计分", lesson_sft),
     "lora": ("冻结基础权重，更新低秩分支", lesson_lora),
     "dpo": ("成对回答的偏好损失", lesson_dpo),
