@@ -15,6 +15,7 @@ from eval_llm import init_model
 from model.model_lora import apply_lora, save_lora
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from scripts.check_course import check_documents
+from scripts.check_doc_examples import examples, main as check_doc_examples
 from scripts.lesson_lab import lesson_resume
 from trainer.train_utils import PROJECT_ROOT
 
@@ -46,6 +47,42 @@ class DocumentationCheckTests(unittest.TestCase):
             self.assertTrue(any("missing local link" in error for error in errors))
             self.assertTrue(any("Python syntax" in error for error in errors))
             self.assertTrue(any("unclosed code fence" in error for error in errors))
+
+    def test_example_runner_selects_only_marked_python_and_preserves_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            document = Path(directory) / "examples.md"
+            document.write_text(
+                "```python\nraise RuntimeError('debugger fragment')\n```\n"
+                "```bash\n# doc-example: shell\nexit 1\n```\n"
+                "```python\n# doc-example: setup\nvalue = 40\n```\n"
+                "```python\n# doc-example: use\nassert value + 2 == 42\n```\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(len(examples(document)), 2)
+            with redirect_stdout(io.StringIO()) as output:
+                result = check_doc_examples(["--document", str(document)])
+            self.assertEqual(result, 0)
+            self.assertIn("2 executable blocks, 0 failures", output.getvalue())
+
+    def test_example_runner_reports_failure_with_document_location(self):
+        with tempfile.TemporaryDirectory() as directory:
+            document = Path(directory) / "broken.md"
+            document.write_text(
+                "```python\n# doc-example: failure\nassert False, 'expected failure'\n```\n",
+                encoding="utf-8",
+            )
+            with redirect_stdout(io.StringIO()) as output:
+                result = check_doc_examples(["--document", str(document)])
+            self.assertEqual(result, 1)
+            self.assertIn("expected failure", output.getvalue())
+            self.assertIn('line 3', output.getvalue())
+
+    def test_example_runner_rejects_unclosed_fences(self):
+        with tempfile.TemporaryDirectory() as directory:
+            document = Path(directory) / "unfinished.md"
+            document.write_text("```python\n# doc-example: unfinished\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unclosed code fence"):
+                examples(document)
 
 
 class AdapterInferenceTests(unittest.TestCase):

@@ -19,11 +19,14 @@
 .venv/bin/python scripts/lesson_lab.py --lesson sft
 .venv/bin/python scripts/lesson_lab.py --lesson all
 .venv/bin/python scripts/check_course.py
+.venv/bin/python scripts/check_doc_examples.py
 ```
 
 13 个 CPU 小实验使用仓库本地资源；预训练与恢复实验的临时权重自动清理。新增 `--lesson resume` 会对照中断恢复与连续训练的最终状态。PPO/GRPO/VLM 的小算例用于理解关键计算，不代表外部模型依赖和完整训练已经验证。
 
 实践卡住时按 [实践排错](doc/0.实践排错.md) 定位阶段；`check_course.py` 检查本地文档链接、Python 代码块语法和调试入口，修改课程后可重复运行。
+
+各章已补充直观场景、计算原因、形状、调试与自查。以 `# doc-example:` 开头的 Python 块可由 `check_doc_examples.py` 实际执行；同一篇内的标记块按顺序共享变量，不执行 shell 命令或未标记的源码片段。详细覆盖范围见 [学习路线的验证记录](doc/0.学习路线.md)。
 
 如果目标是先在一天内跑通代码，请先看 [一天跑通教程 →](doc/0.一天跑通.md)。它使用当前 ARM64/CUDA 环境和仓库自带的最小数据完成 smoke test、预训练和推理，再回到下面的章节扩展数据和训练阶段。
 
