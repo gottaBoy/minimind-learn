@@ -118,6 +118,17 @@
       "justMyCode": true,
       "stopOnEntry": true,
       "args": ["--lesson", "${input:lessonName}"]
+    },
+    {
+      "name": "08 - Inspect FFN matrices (CPU)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${workspaceFolder}/scripts/inspect_ffn.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": ["--breakpoints"]
     }
   ],
   "inputs": [
