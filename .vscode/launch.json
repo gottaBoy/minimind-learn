@@ -129,6 +129,17 @@
       "console": "integratedTerminal",
       "justMyCode": true,
       "args": ["--breakpoints"]
+    },
+    {
+      "name": "09 - Inspect Embedding to logits (CPU)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${workspaceFolder}/scripts/inspect_model.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": ["--breakpoints"]
     }
   ],
   "inputs": [

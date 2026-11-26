@@ -33,6 +33,8 @@
 
 理解 gate/up 的参数和矩阵乘法时，查看 [FFN 矩阵与梯度](doc/3.1.FFN矩阵与梯度.md)。用 `.venv/bin/python scripts/inspect_ffn.py` 可从当前真实批次逐步核对 128→384→128 的行列变化、反向梯度和参数更新；VS Code 对应第 8 项配置。
 
+继续理解 Embedding `[1,63,128]`、K/V `[1,63,32]`、logits `[1,63,6400]` 时，查看 [Embedding 到 logits 矩阵精讲](doc/3.2.Embedding到logits矩阵精讲.md)。用 `.venv/bin/python scripts/inspect_model.py` 核对真实查表、8 个 Q 头与 2 个 KV 头、词表点积；VS Code 对应第 9 项配置。
+
 | 序号       | 章节标题              | 查看文档                              |
 | ---------- | --------------------- | ------------------------------------- |
 | 📚 **0**   | 环境搭建              | [查看文档 →](doc/0.环境搭建.md)       |

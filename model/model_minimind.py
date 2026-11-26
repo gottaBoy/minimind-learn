@@ -556,12 +556,12 @@ class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
         super().__init__(self.config)
         # 3. 初始化基础模型（MiniMindModel：核心编码器/解码器，负责提取文本特征）
         self.model = MiniMindModel(self.config)
-        # 4. 初始化语言建模头（lm_head）：将特征映射为词汇表概率分布
+        # 4. 初始化语言建模头（lm_head）：将特征映射为词表原始分数 logits
         self.lm_head = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias=False)
         # 5. 关键设计：词嵌入层与lm_head共享权重【将hidden映射到词表大小的线性层与词嵌入层共享权重，实现高效的词汇表映射】
         #   词嵌入层：token 索引 → 嵌入向量（用共享权重的「行」）；
-        #   lm_head：特征向量 → logits（用共享权重的「列」）；
-        #   两者共享权重，保证「嵌入→特征→生成」的语义一致性，同时减少参数量。
+        #   lm_head：每个隐藏向量与共享权重的各行点积，即 h @ weight.T；
+        #   两者使用同一参数对象以减少参数量，反向会汇总相关路径的梯度。
         self.model.embed_tokens.weight = self.lm_head.weight
     @classmethod
     def _supports_default_dynamic_cache(cls):
@@ -589,8 +589,8 @@ class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
                 attention_mask: Optional[torch.Tensor] = None,
                 past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
                 use_cache: Optional[bool] = False,
-                # logits可以存储 int 或者 tensor 类型
-                # 「保留前 N 个 logits」 or 「按张量中的索引保留 logits」比如传入张量 torch.tensor([1,3,5])，就是保留第 1、3、5 个位置的 logits
+                # logits_to_keep 可为 int 或索引 tensor：正整数保留末尾 N 个位置，
+                # 0 保留全部；tensor 如 [1,3,5] 则指定需打分的位置。
                 logits_to_keep: Union[int, torch.Tensor] = 0,
                 **kwargs):
         h, past_kvs, aux_loss = self.model(
@@ -600,7 +600,7 @@ class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
             use_cache=use_cache,
             **kwargs
         )
-        # 目的是「筛选出需要计算 logits 的 token 位置」，避免对整个序列的 logits 做冗余计算（比如训练时只需要预测「下一个 token」，只需保留最后一个 token 的 logits）
+        # 训练默认保留全部位置，各自预测下一个 token；生成通常只打分末尾位置。
         # 情况 1：logits_to_keep 是 int 类型（如 3）：
         #   - slice(-3, None) 等价于「从序列倒数第 3 个元素到末尾」（Python 的切片语法）；
         #   - 比如序列长度为 5，slice(-3, None) 对应索引 [2,3,4]（保留最后 3 个 token）。
